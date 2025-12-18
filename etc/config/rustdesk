@@ -1,5 +1,0 @@
-
-config rustdesk
-	option bin_dir '/usr/bin'
-	option enabled '0'
-	option enabled_relay '0'
