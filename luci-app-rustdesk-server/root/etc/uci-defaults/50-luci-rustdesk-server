@@ -1,0 +1,11 @@
+#!/bin/sh
+
+uci -q batch <<-EOF >/dev/null
+	delete ucitrack.@rustdesk[-1]
+	add ucitrack rustdesk
+	set ucitrack.@rustdesk[-1].init=rustdesk
+	commit ucitrack
+EOF
+
+rm -rf /tmp/luci-*
+exit 0

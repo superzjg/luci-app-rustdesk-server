@@ -1,0 +1,151 @@
+#!/bin/sh /etc/rc.common
+
+START=98
+USE_PROCD=1
+LOG_FILE=/var/log/rustdesk.log
+mkdir -p /var/log
+
+get_config() {
+	config_get_bool enabled $1 enabled 0
+	config_get bin_dir $1 bin_dir /usr/bin
+	config_get server_port $1 server_port
+	config_get_bool server_log $1 server_log 0
+	config_get server_key $1 server_key
+	config_get server_relay_servers $1 server_relay_servers
+	config_get server_rendezvous_servers $1 server_rendezvous_servers
+	config_get server_rmem $1 server_rmem
+	config_get server_serial $1 server_serial
+	config_get server_software_url $1 server_software_url
+	config_get set_firewall $1 set_firewall
+	config_get tcp_ports $1 tcp_ports
+	config_get udp_ports $1 udp_ports
+	config_get_bool enabled_relay $1 enabled_relay 0
+	config_get relay_port $1 relay_port
+	config_get relay_key $1 relay_key
+}
+add_firewall() {
+	[ "$set_firewall" == "no" ] && return 0
+	
+	if [ -z "${server_port}" ] && [ -z "${relay_port}" ]; then
+		[ -z "$tcp_ports" ] && tcp_ports="21115-21119"
+		[ -z "$udp_ports" ] && udp_ports=21116
+	fi
+	
+	local mark1=1
+	local mark2=1
+	if [ -n "$tcp_ports" ]; then
+		if [ "$set_firewall" == "check" ] && [ "$(uci -q get firewall.rustdesk_t_auto.proto)" == "tcp" ];then
+			[ "$tcp_ports" == "$(uci -q get firewall.rustdesk_t_auto.dest_port)" ] && mark1=0
+		fi
+		if [ "$mark1" == "1" ]; then
+			uci -q delete firewall.rustdesk_t_auto
+			uci set firewall.rustdesk_t_auto=rule
+			uci set firewall.rustdesk_t_auto.name="rustdesk_t_auto"
+			uci set firewall.rustdesk_t_auto.target="ACCEPT"
+			uci set firewall.rustdesk_t_auto.src="wan"
+			uci set firewall.rustdesk_t_auto.proto="tcp"
+			uci set firewall.rustdesk_t_auto.dest_port="$tcp_ports"
+			uci set firewall.rustdesk_t_auto.enabled="1"
+		fi	
+	fi		
+	if [ -n "$udp_ports" ]; then
+		if [ "$set_firewall" == "check" ] && [ "$(uci -q get firewall.rustdesk_u_auto.proto)" == "udp" ];then
+			[ "$udp_ports" == "$(uci -q get firewall.rustdesk_u_auto.dest_port)" ] && mark2=0
+		fi
+		if [ "$mark2" == "1" ]; then
+			uci -q delete firewall.rustdesk_u_auto
+			uci set firewall.rustdesk_u_auto=rule
+			uci set firewall.rustdesk_u_auto.name="rustdesk_u_auto"
+			uci set firewall.rustdesk_u_auto.target="ACCEPT"
+			uci set firewall.rustdesk_u_auto.src="wan"
+			uci set firewall.rustdesk_u_auto.proto="udp"
+			uci set firewall.rustdesk_u_auto.dest_port="$udp_ports"
+			uci set firewall.rustdesk_u_auto.enabled="1"
+		fi	
+	fi
+	[ "$mark1" == "0" ] && [ "$mark2" == "0" ] && return 0
+	uci commit firewall
+	/etc/init.d/firewall reload >/dev/null 2>&1
+}
+del_firewall() {
+	if [ "$set_firewall" == "force" ]; then
+		local A=$(uci -q show firewall.rustdesk_t_auto)
+		local B=$(uci -q show firewall.rustdesk_u_auto)
+		[ -n "$A" ] && uci -q delete firewall.rustdesk_t_auto
+		[ -n "$B" ] && uci -q delete firewall.rustdesk_u_auto
+		if [ -n "$A" ] || [ -n "$B" ]; then
+			uci commit firewall
+			/etc/init.d/firewall reload >/dev/null 2>&1
+		fi	
+	fi
+}
+
+start_service() {
+	pid=`pidof hbbs`
+	pid1=`pidof hbbr`
+	if [ -n "$pid" ] || [ -n "$pid1" ]; then
+		kill -9 $pid $pid1 2>/dev/null
+	fi
+	config_load rustdesk
+	config_foreach get_config rustdesk
+	[ "x$enabled" != "x1" ] && [ "x${enabled_relay}" != "x1" ] && return
+	
+	[ -x "${bin_dir}/hbbs" ] || chmod +x ${bin_dir}/hbbs
+	[ -x "${bin_dir}/hbbr" ] || chmod +x ${bin_dir}/hbbr
+	[ -x "${bin_dir}/rustdesk-utils" ] || chmod +x ${bin_dir}/rustdesk-utils
+	
+	[ "${server_log}" = "1" ] && STD_out=${LOG_FILE} || STD_out=/dev/null
+	true >${STD_out}
+	if [ "x$enabled" = "x1" ]; then
+		local PARAM_p PARAM_r PARAM_k PARAM_R PARAM_M PARAM_s PARAM_u
+		[ -n "${server_port}" ] && PARAM_p="-p ${server_port}"
+		[ -n "${server_relay_servers}" ] && PARAM_r="-r ${server_relay_servers}"
+		[ -n "${server_key}" ] && PARAM_k="-k ${server_key}"
+		[ -n "${server_rendezvous_servers}" ] && PARAM_R="-R ${server_rendezvous_servers}"
+		[ -n "${server_rmem}" ] && PARAM_M="-M ${server_rmem}"
+		[ -n "${server_serial}" ] && PARAM_s="-s ${server_serial}"
+		[ -n "${server_software_url}" ] && PARAM_u="-u ${server_software_url}"
+		
+		logger -t 'rustdesk' 'hbbs starting.'
+		
+		# 需要cd到目录，否则生成的密钥等其他文件位置不可控
+		procd_open_instance hbbs
+		procd_set_param command "/bin/sh"
+		procd_append_param command -c "cd ${bin_dir} && exec ${bin_dir}/hbbs ${PARAM_p} ${PARAM_r} ${PARAM_k} ${PARAM_R} ${PARAM_M} ${PARAM_s} ${PARAM_u} >>\"${STD_out}\" 2>&1"
+		procd_set_param stdout 0
+		procd_set_param stderr 0
+		procd_set_param respawn
+		procd_close_instance
+	fi
+	if [ "x${enabled_relay}" = "x1" ]; then
+		local PARAM_p1 PARAM_k1
+		[ -n "${relay_port}" ] && PARAM_p1="-p ${relay_port}"
+		[ -n "${relay_key}" ] && PARAM_k1="-k ${relay_key}"
+		
+		logger -t 'rustdesk' 'hbbr startting.'
+		
+		procd_open_instance hbbr
+		procd_set_param command "/bin/sh"
+		procd_append_param command -c "cd ${bin_dir} && exec ${bin_dir}/hbbr ${PARAM_p1} ${PARAM_k1} >>\"${STD_out}\" 2>&1"
+		procd_set_param stdout 0
+		procd_set_param stderr 0
+		procd_set_param respawn
+		procd_close_instance
+	fi
+	add_firewall
+}
+
+stop_service() {
+	config_load rustdesk
+	config_foreach get_config rustdesk
+	del_firewall
+	logger -t 'rustdesk' 'Stopped.'
+}
+reload_service() {
+	stop
+	sleep 1
+	start
+}
+service_triggers() {
+	procd_add_reload_trigger "rustdesk"
+}
